@@ -20,7 +20,9 @@ import React, { useEffect, useMemo, useState } from "react";
  *
  * ---- Added ----
  * - Date input: 20260203 => auto display "2026/02/03"
- * - Task field: nextNote ("次回活動補足") textarea (about 5 lines)
+ * - Task field: nextNote ("次回活動補足") textarea
+ * - NEW: "新規作成" button opens modal for task creation (mobile-friendly)
+ * - NEW: History "実施日時" (date+time) can be specified on add & edit (stored in HistoryEntry.at)
  */
 
 type HistoryType = "email" | "phone" | "other";
@@ -30,7 +32,7 @@ type HistoryEntry = {
   type: HistoryType;
   subject: string;
   note: string;
-  at: string; // ISO
+  at: string; // ISO (実施日時)
   deletedAt?: string; // ISO for soft delete
 };
 
@@ -39,19 +41,17 @@ type TaskState = "open" | "closed";
 type Task = {
   id: number;
   text: string;
-  dueDate: string; // datetime-local value e.g. "2026-02-23T18:30" (storage canonical)
-  status: string; // free input
-  nextNote: string; // ★ 次回活動補足
+  dueDate: string; // canonical "YYYY-MM-DDTHH:mm"
+  status: string;
+  nextNote: string;
   state: TaskState;
-  createdAt: string; // ISO
-  updatedAt: string; // ISO
-  closedAt?: string; // ISO (only when closed)
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string;
   history: HistoryEntry[];
 };
 
 const STORAGE_KEY = "tasks";
-
-// 2 years (approx) & 12 hours in ms
 const TWO_YEARS_MS = 730 * 24 * 60 * 60 * 1000;
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 const THIRTY_MIN_MS = 30 * 60 * 1000;
@@ -60,10 +60,7 @@ const THIRTY_MIN_MS = 30 * 60 * 1000;
  * Date/Time input helpers
  * ========================= */
 
-/**
- * 表示用：8桁なら "YYYY/MM/DD" に自動整形
- * 例) 20260203 -> 2026/02/03
- */
+/** 表示用：8桁なら "YYYY/MM/DD" に自動整形（例: 20260203 -> 2026/02/03） */
 function normalizeDateInputDisplay(v: string) {
   const s = v.trim();
   const digits = s.replace(/\D/g, "");
@@ -73,23 +70,17 @@ function normalizeDateInputDisplay(v: string) {
   return s;
 }
 
-/**
- * 保存用：受け取った日付文字列を "YYYY-MM-DD" に寄せる
- * - "YYYY/MM/DD" もOK
- * - 8桁数字もOK
- */
+/** 保存用："YYYY-MM-DD" へ（8桁数字 / スラッシュOK） */
 function normalizeDateForStorage(v: string) {
   const s = v.trim();
   const digits = s.replace(/\D/g, "");
   if (digits.length === 8) {
     return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
   }
-  // "YYYY/MM/DD" -> "YYYY-MM-DD"
   return s.replace(/\//g, "-");
 }
 
 function normalizeTimeInputDisplay(v: string) {
-  // 例: 1645 → 16:45
   const s = v.trim();
   const digits = s.replace(/\D/g, "");
   if (digits.length === 4) {
@@ -99,7 +90,6 @@ function normalizeTimeInputDisplay(v: string) {
 }
 
 function normalizeTimeForStorage(v: string) {
-  // 今は表示と同じでOK（必要なら拡張）
   return normalizeTimeInputDisplay(v);
 }
 
@@ -117,11 +107,7 @@ function isValidTimeHHmm(v: string) {
   return h >= 0 && h <= 23 && m >= 0 && m <= 59;
 }
 
-/**
- * 結合（保存形式へ）
- * - 両方空なら ""（未設定）
- * - 途中入力（不正）なら ""（保存しない）
- */
+/** dueDate保存形式に結合（途中入力は ""） */
 function combineDateTimeLocalFromText(dateRaw: string, timeRaw: string) {
   const d = normalizeDateForStorage(dateRaw);
   const t = normalizeTimeForStorage(timeRaw);
@@ -131,12 +117,12 @@ function combineDateTimeLocalFromText(dateRaw: string, timeRaw: string) {
   return `${d}T${t}`;
 }
 
-/** dueDate(保存形式) -> 表示用テキスト */
+/** dueDate(保存形式) -> 表示用（dateはスラッシュ） */
 function splitDateTimeLocalToText(value: string) {
   if (!value) return { date: "", time: "" };
   const [date, time] = value.split("T");
   return {
-    date: (date ?? "").replace(/-/g, "/"), // ★ 表示はスラッシュ
+    date: (date ?? "").replace(/-/g, "/"),
     time: time ?? "",
   };
 }
@@ -145,14 +131,31 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+/** 実施日時：入力(date/time) -> ISO。未入力なら now。片方だけなら無効扱いで now。 */
+function buildHistoryAtIso(dateRaw: string, timeRaw: string) {
+  const d = normalizeDateForStorage(dateRaw);
+  const t = normalizeTimeForStorage(timeRaw);
+
+  const hasAny = !!dateRaw.trim() || !!timeRaw.trim();
+  if (!hasAny) return nowIso();
+
+  if (!isValidDateYYYYMMDDOrSlash(d) || !isValidTimeHHmm(t)) {
+    return nowIso();
+  }
+
+  const [y, m, dd] = d.split("-").map(Number);
+  const [hh, mm] = t.split(":").map(Number);
+
+  // local -> ISO
+  return new Date(y, m - 1, dd, hh, mm, 0, 0).toISOString();
+}
+
 function isObject(x: unknown): x is Record<string, any> {
   return !!x && typeof x === "object";
 }
 
 function parseDueToMs(dueDate: string): number | null {
   if (!dueDate) return null;
-
-  // dueDate: "YYYY-MM-DDTHH:mm"
   const [datePart, timePart] = dueDate.split("T");
   if (!datePart || !timePart) return null;
 
@@ -169,7 +172,6 @@ function parseDueToMs(dueDate: string): number | null {
     return null;
   }
 
-  // ★ ローカル時刻として生成（UTCズレを防ぐ）
   return new Date(y, m - 1, d, hh, mm, 0, 0).getTime();
 }
 
@@ -190,8 +192,7 @@ function typeIcon(t: HistoryType) {
 
 function formatDateTimeLocal(value: string) {
   if (!value) return "未設定";
-  // value is storage canonical "YYYY-MM-DDTHH:mm"
-  return value.replace("T", " ").replace(/-/g, "/"); // ★ 表示をスラッシュに
+  return value.replace("T", " ").replace(/-/g, "/");
 }
 
 function formatIsoToYmdHm(iso: string) {
@@ -202,7 +203,7 @@ function formatIsoToYmdHm(iso: string) {
   const dd = String(d.getDate()).padStart(2, "0");
   const hh = String(d.getHours()).padStart(2, "0");
   const mi = String(d.getMinutes()).padStart(2, "0");
-  return `${yyyy}/${mm}/${dd} ${hh}:${mi}`; // ★ 表示をスラッシュに
+  return `${yyyy}/${mm}/${dd} ${hh}:${mi}`;
 }
 
 function remainingMsUntilHardDelete(deletedAtIso: string) {
@@ -246,7 +247,7 @@ function normalizeTasks(raw: unknown): Task[] {
     const text = typeof item.text === "string" ? item.text : "";
     const dueDate = typeof item.dueDate === "string" ? item.dueDate : "";
     const status = typeof item.status === "string" ? item.status : "";
-    const nextNote = typeof item.nextNote === "string" ? item.nextNote : ""; // ★ migration default
+    const nextNote = typeof item.nextNote === "string" ? item.nextNote : "";
     const state: TaskState = item.state === "closed" ? "closed" : "open";
 
     const createdAt = typeof item.createdAt === "string" ? item.createdAt : nowIso();
@@ -289,7 +290,6 @@ function saveTasks(tasks: Task[]) {
 function cleanup(tasks: Task[]): Task[] {
   const now = Date.now();
 
-  // 1) Remove closed tasks older than 2 years from closedAt
   let cleaned = tasks.filter((t) => {
     if (t.state !== "closed") return true;
     if (!t.closedAt) return true;
@@ -298,7 +298,6 @@ function cleanup(tasks: Task[]): Task[] {
     return now - closedMs < TWO_YEARS_MS;
   });
 
-  // 2) Hard-delete history entries soft-deleted more than 12 hours ago
   cleaned = cleaned.map((t) => {
     const nextHistory = t.history.filter((h) => {
       if (!h.deletedAt) return true;
@@ -332,7 +331,6 @@ function msOr0(iso: string | undefined) {
 }
 
 function mergeHistory(a: HistoryEntry[], b: HistoryEntry[]) {
-  // unique by history.id, prefer newer "at" if duplicates (rare)
   const map = new Map<string, HistoryEntry>();
   for (const h of a) map.set(h.id, h);
   for (const h of b) {
@@ -366,7 +364,6 @@ function mergeTasks(current: Task[], incoming: Task[]) {
     const older = newer === inc ? cur : inc;
 
     const mergedHistory = mergeHistory(older.history ?? [], newer.history ?? []);
-    // newer優先。ただし history は結合
     map.set(inc.id, { ...newer, history: mergedHistory });
   }
 
@@ -383,7 +380,6 @@ async function copyToClipboard(text: string) {
     // ignore
   }
 
-  // fallback
   try {
     const ta = document.createElement("textarea");
     ta.value = text;
@@ -401,16 +397,15 @@ async function copyToClipboard(text: string) {
 
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
-
-  // List view
   const [tab, setTab] = useState<TaskState>("open");
 
-  // Add form
+  // Create modal
+  const [showCreate, setShowCreate] = useState(false);
+
+  // Add form state (create modal)
   const [newText, setNewText] = useState("");
   const [newStatus, setNewStatus] = useState("");
-  const [newNextNote, setNewNextNote] = useState(""); // ★ 追加フォーム：次回活動補足
-
-  // ★ 日付・時刻は separate state（入力途中でも消えない）
+  const [newNextNote, setNewNextNote] = useState("");
   const [newDueDateText, setNewDueDateText] = useState("");
   const [newDueTimeText, setNewDueTimeText] = useState("");
 
@@ -421,7 +416,7 @@ export default function Home() {
   // Task edit fields
   const [editText, setEditText] = useState("");
   const [editStatus, setEditStatus] = useState("");
-  const [editNextNote, setEditNextNote] = useState(""); // ★ 編集：次回活動補足
+  const [editNextNote, setEditNextNote] = useState("");
   const [editDueDateText, setEditDueDateText] = useState("");
   const [editDueTimeText, setEditDueTimeText] = useState("");
 
@@ -429,12 +424,16 @@ export default function Home() {
   const [histType, setHistType] = useState<HistoryType>("email");
   const [histSubject, setHistSubject] = useState("");
   const [histNote, setHistNote] = useState("");
+  const [histAtDate, setHistAtDate] = useState("");
+  const [histAtTime, setHistAtTime] = useState("");
 
   // History editing state
   const [historyEditingId, setHistoryEditingId] = useState<string | null>(null);
   const [histEditType, setHistEditType] = useState<HistoryType>("email");
   const [histEditSubject, setHistEditSubject] = useState("");
   const [histEditNote, setHistEditNote] = useState("");
+  const [histEditAtDate, setHistEditAtDate] = useState("");
+  const [histEditAtTime, setHistEditAtTime] = useState("");
 
   /** backup/restore UI state */
   const [showBackup, setShowBackup] = useState(false);
@@ -444,19 +443,16 @@ export default function Home() {
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Initial load + cleanup
   useEffect(() => {
     const loaded = cleanup(loadTasks());
     setTasks(loaded);
     saveTasks(loaded);
   }, []);
 
-  // Persist on change
   useEffect(() => {
     saveTasks(tasks);
   }, [tasks]);
 
-  // Periodic cleanup
   useEffect(() => {
     const id = window.setInterval(() => {
       setTasks((prev) => {
@@ -468,7 +464,6 @@ export default function Home() {
     return () => window.clearInterval(id);
   }, []);
 
-  // When modal opens, copy fields
   useEffect(() => {
     if (!editingTask) return;
 
@@ -480,18 +475,20 @@ export default function Home() {
     setEditDueDateText(date);
     setEditDueTimeText(time);
 
-    // reset history add & edit
     setHistType("email");
     setHistSubject("");
     setHistNote("");
+    setHistAtDate("");
+    setHistAtTime("");
 
     setHistoryEditingId(null);
     setHistEditType("email");
     setHistEditSubject("");
     setHistEditNote("");
+    setHistEditAtDate("");
+    setHistEditAtTime("");
   }, [editingTask?.id]);
 
-  // tiny toast auto-hide
   useEffect(() => {
     if (!toast) return;
     const id = window.setTimeout(() => setToast(null), 1800);
@@ -521,13 +518,24 @@ export default function Home() {
 
   const list = tab === "open" ? openTasksSorted : closedTasksSorted;
 
+  function resetCreateForm() {
+    setNewText("");
+    setNewStatus("");
+    setNewNextNote("");
+    setNewDueDateText("");
+    setNewDueTimeText("");
+  }
+
+  function openCreate() {
+    resetCreateForm();
+    setShowCreate(true);
+  }
+
   function addTask() {
     const text = newText.trim();
     if (!text) return;
 
     const iso = nowIso();
-
-    // ★ ここでだけ結合（途中入力は dueDate="" にする）
     const dueDate = combineDateTimeLocalFromText(newDueDateText, newDueTimeText);
 
     const task: Task = {
@@ -543,21 +551,12 @@ export default function Home() {
     };
 
     setTasks((prev) => [...prev, task]);
-
-    setNewText("");
-    setNewStatus("");
-    setNewNextNote("");
-    setNewDueDateText("");
-    setNewDueTimeText("");
+    setShowCreate(false);
+    setToast("追加しました");
   }
 
   function updateTask(id: number, patch: Partial<Task>) {
-    setTasks((prev) =>
-      prev.map((t) => {
-        if (t.id !== id) return t;
-        return { ...t, ...patch, updatedAt: nowIso() };
-      })
-    );
+    setTasks((prev) => prev.map((t) => (t.id !== id ? t : { ...t, ...patch, updatedAt: nowIso() })));
   }
 
   function deleteTask(id: number) {
@@ -623,7 +622,15 @@ export default function Home() {
     const note = histNote.trim();
     if (!subject && !note) return;
 
-    const entry: HistoryEntry = { id: safeUUID(), type: histType, subject, note, at: nowIso() };
+    const atIso = buildHistoryAtIso(histAtDate, histAtTime);
+
+    const entry: HistoryEntry = {
+      id: safeUUID(),
+      type: histType,
+      subject,
+      note,
+      at: atIso,
+    };
 
     setTasks((prev) =>
       prev.map((t) => (t.id !== editingTask.id ? t : { ...t, updatedAt: nowIso(), history: [...t.history, entry] }))
@@ -632,6 +639,8 @@ export default function Home() {
     setHistSubject("");
     setHistNote("");
     setHistType("email");
+    setHistAtDate("");
+    setHistAtTime("");
   }
 
   function beginEditHistory(entry: HistoryEntry) {
@@ -639,6 +648,20 @@ export default function Home() {
     setHistEditType(entry.type);
     setHistEditSubject(entry.subject);
     setHistEditNote(entry.note);
+
+    const d = new Date(entry.at);
+    if (Number.isNaN(d.getTime())) {
+      setHistEditAtDate("");
+      setHistEditAtTime("");
+      return;
+    }
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    setHistEditAtDate(`${yyyy}/${mm}/${dd}`);
+    setHistEditAtTime(`${hh}:${mi}`);
   }
 
   function cancelEditHistory() {
@@ -646,10 +669,14 @@ export default function Home() {
     setHistEditType("email");
     setHistEditSubject("");
     setHistEditNote("");
+    setHistEditAtDate("");
+    setHistEditAtTime("");
   }
 
   function saveHistoryEdit(entryId: string) {
     if (!editingTask) return;
+
+    const atIso = buildHistoryAtIso(histEditAtDate, histEditAtTime);
 
     setTasks((prev) =>
       prev.map((t) => {
@@ -657,7 +684,13 @@ export default function Home() {
         const nextHistory = t.history.map((h) => {
           if (h.id !== entryId) return h;
           if (h.deletedAt) return h;
-          return { ...h, type: histEditType, subject: histEditSubject, note: histEditNote };
+          return {
+            ...h,
+            type: histEditType,
+            subject: histEditSubject,
+            note: histEditNote,
+            at: atIso,
+          };
         });
         return { ...t, updatedAt: nowIso(), history: nextHistory };
       })
@@ -693,7 +726,6 @@ export default function Home() {
     );
   }
 
-  /** backup/restore handlers */
   function openBackup() {
     const json = JSON.stringify(tasks, null, 2);
     setBackupJson(json);
@@ -736,11 +768,9 @@ export default function Home() {
     }
   }
 
-  // Styling helpers
   function rowClass(task: Task) {
     const base = "w-full text-left border p-3 sm:p-4 rounded-lg hover:bg-gray-50 transition shadow-sm";
     if (task.state !== "open") return `${base} border-gray-200`;
-
     const tone = taskRowTone(task);
     if (tone === "overdue") return `${base} border-red-400 bg-red-50`;
     if (tone === "soon") return `${base} border-yellow-400 bg-yellow-50`;
@@ -756,6 +786,10 @@ export default function Home() {
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-800">タスク管理</h1>
 
           <div className="flex flex-wrap gap-2">
+            <button onClick={openCreate} className="bg-blue-600 text-white px-4 py-2 rounded-xl font-semibold">
+              ＋ 新規作成
+            </button>
+
             <button onClick={openBackup} className="border px-4 py-2 rounded-xl hover:bg-gray-50 text-gray-800">
               バックアップ（コピー）
             </button>
@@ -765,76 +799,21 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Tabs */}
         <div className="flex gap-2 mb-5">
           <button
             onClick={() => setTab("open")}
-            className={`px-4 py-3 rounded-xl border text-gray-800 text-sm sm:text-base ${
-              tab === "open" ? "bg-gray-100 font-semibold" : "bg-white"
-            }`}
+            className={`px-4 py-3 rounded-xl border text-gray-800 text-sm sm:text-base ${tab === "open" ? "bg-gray-100 font-semibold" : "bg-white"}`}
           >
             進行中（{openTasksSorted.length}）
           </button>
           <button
             onClick={() => setTab("closed")}
-            className={`px-4 py-3 rounded-xl border text-gray-800 text-sm sm:text-base ${
-              tab === "closed" ? "bg-gray-100 font-semibold" : "bg-white"
-            }`}
+            className={`px-4 py-3 rounded-xl border text-gray-800 text-sm sm:text-base ${tab === "closed" ? "bg-gray-100 font-semibold" : "bg-white"}`}
           >
             クローズ済み（{closedTasksSorted.length}）
           </button>
         </div>
 
-        {/* Add form */}
-        <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 mb-6">
-          <input
-            className={`${inputBase} sm:col-span-12`}
-            value={newText}
-            onChange={(e) => setNewText(e.target.value)}
-            placeholder="タスクを入力"
-          />
-
-          <input
-            type="text"
-            inputMode="numeric"
-            className={`${inputBase} sm:col-span-4`}
-            placeholder="日付 2026/02/03 / 20260203"
-            value={newDueDateText}
-            onChange={(e) => setNewDueDateText(normalizeDateInputDisplay(e.target.value))}
-          />
-          <input
-            type="text"
-            inputMode="numeric"
-            className={`${inputBase} sm:col-span-4`}
-            placeholder="時刻 16:45 / 1645"
-            value={newDueTimeText}
-            onChange={(e) => setNewDueTimeText(normalizeTimeInputDisplay(e.target.value))}
-          />
-          <input
-            className={`${inputBase} sm:col-span-4`}
-            value={newStatus}
-            onChange={(e) => setNewStatus(e.target.value)}
-            placeholder="ステータス（自由）"
-          />
-
-          {/* ★ 次回活動補足 */}
-          <textarea
-            className={`${inputBase} sm:col-span-12 min-h-[120px]`}
-            rows={5}
-            value={newNextNote}
-            onChange={(e) => setNewNextNote(e.target.value)}
-            placeholder="次回活動補足（例: 次にやること/確認点/注意点など。5行くらい書けます）"
-          />
-
-          <button
-            onClick={addTask}
-            className="sm:col-span-12 bg-blue-600 text-white py-3 rounded-xl font-semibold active:scale-[0.99]"
-          >
-            追加
-          </button>
-        </div>
-
-        {/* List */}
         <div className="space-y-3">
           {list.map((task) => (
             <button key={task.id} onClick={() => setEditingId(task.id)} className={rowClass(task)}>
@@ -845,35 +824,93 @@ export default function Home() {
                 <div className="text-xs text-gray-600">経緯: {task.history.filter((h) => !h.deletedAt).length}件</div>
               </div>
               {task.nextNote?.trim() ? (
-                <div className="mt-2 text-sm text-gray-700 whitespace-pre-wrap line-clamp-2">
-                  次回活動補足: {task.nextNote}
-                </div>
+                <div className="mt-2 text-sm text-gray-700 whitespace-pre-wrap line-clamp-2">次回活動補足: {task.nextNote}</div>
               ) : null}
             </button>
           ))}
 
-          {list.length === 0 && (
-            <div className="text-gray-600">
-              {tab === "open" ? "進行中タスクがありません" : "クローズ済みタスクがありません"}
-            </div>
-          )}
+          {list.length === 0 && <div className="text-gray-600">{tab === "open" ? "進行中タスクがありません" : "クローズ済みタスクがありません"}</div>}
         </div>
       </div>
 
-      {/* Toast */}
       {toast && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-black/80 text-white px-4 py-2 rounded-xl text-sm">
-          {toast}
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-black/80 text-white px-4 py-2 rounded-xl text-sm">{toast}</div>
+      )}
+
+      {/* Create Modal */}
+      {showCreate && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-3 sm:p-4" onClick={() => setShowCreate(false)}>
+          <div className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-lg font-bold text-gray-900">新規タスク作成</div>
+              <button onClick={() => setShowCreate(false)} className="text-gray-600 hover:text-gray-900 text-xl">
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto pr-1 space-y-3">
+              <label className="block">
+                <div className="text-sm text-gray-700 mb-1">タスク名</div>
+                <input className={`w-full ${inputBase}`} value={newText} onChange={(e) => setNewText(e.target.value)} placeholder="タスクを入力" />
+              </label>
+
+              <label className="block">
+                <div className="text-sm text-gray-700 mb-1">次回対応日時</div>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    className={`${inputBase} w-[160px]`}
+                    placeholder="日付 2026/02/03 / 20260203"
+                    value={newDueDateText}
+                    onChange={(e) => setNewDueDateText(normalizeDateInputDisplay(e.target.value))}
+                  />
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    className={`${inputBase} w-[140px]`}
+                    placeholder="時刻 16:45 / 1645"
+                    value={newDueTimeText}
+                    onChange={(e) => setNewDueTimeText(normalizeTimeInputDisplay(e.target.value))}
+                  />
+                </div>
+                <div className="text-xs text-gray-600 mt-1">表示プレビュー: {formatDateTimeLocal(combineDateTimeLocalFromText(newDueDateText, newDueTimeText))}</div>
+              </label>
+
+              <label className="block">
+                <div className="text-sm text-gray-700 mb-1">ステータス（自由）</div>
+                <input className={`w-full ${inputBase}`} value={newStatus} onChange={(e) => setNewStatus(e.target.value)} placeholder="例: 対応中 / 保留 / 確認待ち" />
+              </label>
+
+              <label className="block">
+                <div className="text-sm text-gray-700 mb-1">次回活動補足</div>
+                <textarea className={`w-full ${inputBase} min-h-[140px]`} rows={5} value={newNextNote} onChange={(e) => setNewNextNote(e.target.value)} placeholder="次回の作業メモ / 確認事項 / 注意点など（5行くらい）" />
+              </label>
+            </div>
+
+            <div className="pt-4 mt-4 border-t flex flex-col sm:flex-row gap-2 justify-end">
+              <button onClick={() => setShowCreate(false)} className="w-full sm:w-auto border px-5 py-3 rounded-xl text-gray-800">
+                キャンセル
+              </button>
+              <button
+                onClick={addTask}
+                className="w-full sm:w-auto bg-blue-600 text-white px-5 py-3 rounded-xl font-semibold disabled:opacity-50"
+                disabled={newText.trim() === ""}
+                title={newText.trim() === "" ? "タスク名は必須です" : ""}
+              >
+                追加
+              </button>
+            </div>
+
+            {newText.trim() === "" && <div className="text-sm text-red-700 mt-2">※タスク名が空だと追加できません</div>}
+          </div>
         </div>
       )}
 
       {/* Backup Modal */}
       {showBackup && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-3 sm:p-4" onClick={() => setShowBackup(false)}>
-          <div
-            className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
               <div className="text-lg font-bold text-gray-900">バックアップ（JSON）</div>
               <button onClick={() => setShowBackup(false)} className="text-gray-600 hover:text-gray-900 text-xl">
@@ -900,10 +937,7 @@ export default function Home() {
       {/* Restore Modal */}
       {showRestore && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-3 sm:p-4" onClick={() => setShowRestore(false)}>
-          <div
-            className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
               <div className="text-lg font-bold text-gray-900">復元（JSON貼り付け）</div>
               <button onClick={() => setShowRestore(false)} className="text-gray-600 hover:text-gray-900 text-xl">
@@ -913,12 +947,7 @@ export default function Home() {
 
             <div className="text-sm text-gray-700 mb-2">PCでコピーしたバックアップJSONを、ここにそのまま貼り付けてください（マージ取り込み）。</div>
 
-            <textarea
-              className="w-full flex-1 border rounded-xl p-3 font-mono text-xs text-gray-800 bg-white"
-              value={restoreJson}
-              onChange={(e) => setRestoreJson(e.target.value)}
-              placeholder="ここにJSONを貼り付け…"
-            />
+            <textarea className="w-full flex-1 border rounded-xl p-3 font-mono text-xs text-gray-800 bg-white" value={restoreJson} onChange={(e) => setRestoreJson(e.target.value)} placeholder="ここにJSONを貼り付け…" />
 
             {restoreError && <div className="mt-2 text-sm text-red-700">{restoreError}</div>}
 
@@ -931,20 +960,15 @@ export default function Home() {
               </button>
             </div>
 
-            <div className="mt-2 text-xs text-gray-600">
-              ※ 同じIDのタスクがある場合は、更新日時（updatedAt）が新しい方を優先します。履歴は重複を除いて結合します。
-            </div>
+            <div className="mt-2 text-xs text-gray-600">※ 同じIDのタスクがある場合は、更新日時（updatedAt）が新しい方を優先します。履歴は重複を除いて結合します。</div>
           </div>
         </div>
       )}
 
-      {/* Modal: Task detail */}
+      {/* Task detail */}
       {editingTask && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto" onClick={() => setEditingId(null)}>
-          <div
-            className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col text-gray-800"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col text-gray-800" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl sm:text-2xl font-bold text-gray-900">タスク詳細</h2>
               <button onClick={() => setEditingId(null)} className="text-gray-600 hover:text-gray-900 text-xl">
@@ -980,9 +1004,7 @@ export default function Home() {
                         onChange={(e) => setEditDueTimeText(normalizeTimeInputDisplay(e.target.value))}
                       />
                     </div>
-                    <div className="text-xs text-gray-600 mt-1">
-                      表示プレビュー: {formatDateTimeLocal(combineDateTimeLocalFromText(editDueDateText, editDueTimeText))}
-                    </div>
+                    <div className="text-xs text-gray-600 mt-1">表示プレビュー: {formatDateTimeLocal(combineDateTimeLocalFromText(editDueDateText, editDueTimeText))}</div>
                   </label>
 
                   <label className="block">
@@ -991,16 +1013,9 @@ export default function Home() {
                   </label>
                 </div>
 
-                {/* ★ 次回活動補足 */}
                 <label className="block">
                   <div className="text-sm text-gray-700 mb-1">次回活動補足</div>
-                  <textarea
-                    className={`w-full ${inputBase} min-h-[140px]`}
-                    rows={5}
-                    value={editNextNote}
-                    onChange={(e) => setEditNextNote(e.target.value)}
-                    placeholder="次回の作業メモ / 確認事項 / 注意点など"
-                  />
+                  <textarea className={`w-full ${inputBase} min-h-[140px]`} rows={5} value={editNextNote} onChange={(e) => setEditNextNote(e.target.value)} />
                 </label>
 
                 {/* History add */}
@@ -1026,6 +1041,32 @@ export default function Home() {
                     </label>
                   </div>
 
+                  {/* NEW: 実施日時 */}
+                  <div className="mb-2">
+                    <div className="text-sm text-gray-700 mb-1">実施日時（任意）</div>
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        className={`${inputBase} w-[160px]`}
+                        placeholder="日付 2026/02/03 / 20260203"
+                        value={histAtDate}
+                        onChange={(e) => setHistAtDate(normalizeDateInputDisplay(e.target.value))}
+                      />
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        className={`${inputBase} w-[140px]`}
+                        placeholder="時刻 16:45 / 1645"
+                        value={histAtTime}
+                        onChange={(e) => setHistAtTime(normalizeTimeInputDisplay(e.target.value))}
+                      />
+                    </div>
+                    <div className="text-xs text-gray-600 mt-1">
+                      未入力なら「今の時刻」で登録。プレビュー: {formatIsoToYmdHm(buildHistoryAtIso(histAtDate, histAtTime))}
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                     <input className={`${inputBase}`} value={histSubject} onChange={(e) => setHistSubject(e.target.value)} placeholder="件名（全タイプ共通）" />
                     <button onClick={addHistory} className="bg-blue-600 text-white px-4 py-3 rounded-xl font-semibold active:scale-[0.99]" >
@@ -1033,12 +1074,7 @@ export default function Home() {
                     </button>
                   </div>
 
-                  <textarea
-                    className={`mt-2 w-full ${inputBase} min-h-[90px]`}
-                    value={histNote}
-                    onChange={(e) => setHistNote(e.target.value)}
-                    placeholder="本文（例: 3/1 11:00 振込確認。未着のため再連絡予定。)"
-                  />
+                  <textarea className={`mt-2 w-full ${inputBase} min-h-[90px]`} value={histNote} onChange={(e) => setHistNote(e.target.value)} placeholder="本文（例: 3/1 11:00 振込確認。未着のため再連絡予定。)" />
                   <div className="text-xs text-gray-600 mt-1">※「件名」か「本文」のどちらかが入っていれば追加できます</div>
                 </div>
 
@@ -1066,9 +1102,7 @@ export default function Home() {
                                     <div className="text-xs text-gray-600">
                                       {formatIsoToYmdHm(h.at)}{" "}
                                       {isDeleted && h.deletedAt ? (
-                                        <span className="ml-2 text-red-700">
-                                          削除済み（あと{formatRemaining(remaining)}で完全削除）
-                                        </span>
+                                        <span className="ml-2 text-red-700">削除済み（あと{formatRemaining(remaining)}で完全削除）</span>
                                       ) : null}
                                     </div>
 
@@ -1095,6 +1129,32 @@ export default function Home() {
                                             <input type="radio" name={`editType-${h.id}`} checked={histEditType === "other"} onChange={() => setHistEditType("other")} />
                                             📝
                                           </label>
+                                        </div>
+
+                                        {/* NEW: 実施日時（編集） */}
+                                        <div>
+                                          <div className="text-sm text-gray-700 mb-1">実施日時</div>
+                                          <div className="flex flex-wrap gap-2">
+                                            <input
+                                              type="text"
+                                              inputMode="numeric"
+                                              className={`${inputBase} w-[160px]`}
+                                              placeholder="日付 2026/02/03 / 20260203"
+                                              value={histEditAtDate}
+                                              onChange={(e) => setHistEditAtDate(normalizeDateInputDisplay(e.target.value))}
+                                            />
+                                            <input
+                                              type="text"
+                                              inputMode="numeric"
+                                              className={`${inputBase} w-[140px]`}
+                                              placeholder="時刻 16:45 / 1645"
+                                              value={histEditAtTime}
+                                              onChange={(e) => setHistEditAtTime(normalizeTimeInputDisplay(e.target.value))}
+                                            />
+                                          </div>
+                                          <div className="text-xs text-gray-600 mt-1">
+                                            プレビュー: {formatIsoToYmdHm(buildHistoryAtIso(histEditAtDate, histEditAtTime))}
+                                          </div>
                                         </div>
 
                                         <input className={`w-full ${inputBase}`} value={histEditSubject} onChange={(e) => setHistEditSubject(e.target.value)} placeholder="件名" />
@@ -1202,11 +1262,7 @@ export default function Home() {
                   閉じる
                 </button>
 
-                <button
-                  onClick={saveTaskEdits}
-                  className="bg-blue-600 text-white px-5 py-3 rounded-xl font-semibold disabled:opacity-50"
-                  disabled={editText.trim() === ""}
-                >
+                <button onClick={saveTaskEdits} className="bg-blue-600 text-white px-5 py-3 rounded-xl font-semibold disabled:opacity-50" disabled={editText.trim() === ""}>
                   保存
                 </button>
               </div>
