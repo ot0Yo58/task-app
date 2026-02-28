@@ -1,5 +1,5 @@
 // public/sw.js
-const CACHE_NAME = "task-pwa-v1";
+const CACHE_NAME = "task-pwa-v2";
 const CORE_ASSETS = ["/", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
