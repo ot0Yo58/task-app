@@ -16,10 +16,6 @@ import React, { useEffect, useMemo, useState } from "react";
  *    - editable
  *    - soft delete first; permanent delete after 12 hours; can restore within 12 hours
  * - LocalStorage persistence + safe migration from older shapes
- *
- * ---- Fixed ----
- * - dueDate input is manual text without vanishing while typing
- * - date/time separated states (new + edit)
  */
 
 type HistoryType = "email" | "phone" | "other";
@@ -38,7 +34,7 @@ type TaskState = "open" | "closed";
 type Task = {
   id: number;
   text: string;
-  dueDate: string; // "YYYY-MM-DDTHH:mm" or ""
+  dueDate: string; // datetime-local value e.g. "2026-02-23T18:30"
   status: string; // free input
   state: TaskState;
   createdAt: string; // ISO
@@ -287,11 +283,8 @@ export default function Home() {
 
   // Add form
   const [newText, setNewText] = useState("");
+  const [newDueDate, setNewDueDate] = useState("");
   const [newStatus, setNewStatus] = useState("");
-
-  // ✅ dueDate: separate states (NO vanishing)
-  const [newDueDateDate, setNewDueDateDate] = useState("");
-  const [newDueDateTime, setNewDueDateTime] = useState("");
 
   // Modal edit
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -302,11 +295,8 @@ export default function Home() {
 
   // Task edit fields
   const [editText, setEditText] = useState("");
+  const [editDueDate, setEditDueDate] = useState("");
   const [editStatus, setEditStatus] = useState("");
-
-  // ✅ dueDate: separate states (NO vanishing)
-  const [editDueDateDate, setEditDueDateDate] = useState("");
-  const [editDueDateTime, setEditDueDateTime] = useState("");
 
   // History add fields
   const [histType, setHistType] = useState<HistoryType>("email");
@@ -326,6 +316,13 @@ export default function Home() {
     saveTasks(loaded);
   }, []);
 
+  // Service Worker register (PWA)
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+  }, []);
+
   // Persist on change
   useEffect(() => {
     saveTasks(tasks);
@@ -343,23 +340,12 @@ export default function Home() {
     return () => window.clearInterval(id);
   }, []);
 
-  // Service Worker register (PWA)
-  useEffect(() => {
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => {});
-    }
-  }, []);
-
-  // ✅ When modal opens, copy fields + split dueDate into date/time states
+  // When modal opens, copy fields
   useEffect(() => {
     if (!editingTask) return;
-
     setEditText(editingTask.text);
+    setEditDueDate(editingTask.dueDate);
     setEditStatus(editingTask.status);
-
-    const { date, time } = splitDateTimeLocalToText(editingTask.dueDate);
-    setEditDueDateDate(date);
-    setEditDueDateTime(time);
 
     // reset history add & edit
     setHistType("email");
@@ -374,6 +360,7 @@ export default function Home() {
 
   const openTasksSorted = useMemo(() => {
     const open = tasks.filter((t) => t.state === "open");
+
     return [...open].sort((a, b) => {
       const aBlank = !a.dueDate;
       const bBlank = !b.dueDate;
@@ -400,12 +387,10 @@ export default function Home() {
     if (!text) return;
 
     const iso = nowIso();
-    const dueDate = combineDateTimeLocalFromText(newDueDateDate, newDueDateTime);
-
     const task: Task = {
       id: Date.now(),
       text,
-      dueDate, // ✅ only here we combine (invalid => "")
+      dueDate: newDueDate,
       status: newStatus.trim(),
       state: "open",
       createdAt: iso,
@@ -416,9 +401,8 @@ export default function Home() {
     setTasks((prev) => [...prev, task]);
 
     setNewText("");
+    setNewDueDate("");
     setNewStatus("");
-    setNewDueDateDate("");
-    setNewDueDateTime("");
   }
 
   function updateTask(id: number, patch: Partial<Task>) {
@@ -498,11 +482,9 @@ export default function Home() {
     const text = editText.trim();
     if (!text) return;
 
-    const dueDate = combineDateTimeLocalFromText(editDueDateDate, editDueDateTime);
-
     updateTask(editingTask.id, {
       text,
-      dueDate, // ✅ combine only here
+      dueDate: editDueDate,
       status: editStatus.trim(),
     });
 
@@ -610,81 +592,103 @@ export default function Home() {
 
   // Styling helpers
   function rowClass(task: Task) {
-    const base = "w-full text-left border p-3 rounded hover:bg-gray-50 transition";
-    if (task.state !== "open") return base;
+    const base =
+      "w-full text-left border p-3 sm:p-4 rounded-lg hover:bg-gray-50 transition shadow-sm";
+    if (task.state !== "open") return `${base} border-gray-200`;
 
     const tone = taskRowTone(task);
     if (tone === "overdue") return `${base} border-red-400 bg-red-50`;
     if (tone === "soon") return `${base} border-yellow-400 bg-yellow-50`;
-    return base;
+    return `${base} border-gray-200`;
   }
 
+  // 共通：入力欄の見た目（スマホで薄くならない）
+  const inputBase =
+    "border p-3 rounded-lg text-gray-800 placeholder:text-gray-500 bg-white";
+
   return (
-    <div className="min-h-screen bg-gray-100 p-6">
-      <div className="max-w-5xl mx-auto bg-white shadow p-6 rounded">
-        <h1 className="text-2xl font-bold mb-4">タスク管理</h1>
+    <div className="min-h-screen bg-gray-50 p-4 sm:p-6 text-gray-800">
+      <div className="max-w-5xl mx-auto bg-white shadow p-4 sm:p-6 rounded-2xl">
+        <h1 className="text-2xl sm:text-3xl font-bold mb-4 text-gray-800">
+          タスク管理
+        </h1>
 
         {/* Tabs */}
-        <div className="flex gap-2 mb-6">
+        <div className="flex gap-2 mb-5">
           <button
             onClick={() => setTab("open")}
-            className={`px-3 py-2 rounded border ${tab === "open" ? "bg-gray-100 font-semibold" : "bg-white"}`}
+            className={`px-4 py-3 rounded-xl border text-gray-800 text-sm sm:text-base ${
+              tab === "open" ? "bg-gray-100 font-semibold" : "bg-white"
+            }`}
           >
             進行中（{openTasksSorted.length}）
           </button>
           <button
             onClick={() => setTab("closed")}
-            className={`px-3 py-2 rounded border ${tab === "closed" ? "bg-gray-100 font-semibold" : "bg-white"}`}
+            className={`px-4 py-3 rounded-xl border text-gray-800 text-sm sm:text-base ${
+              tab === "closed" ? "bg-gray-100 font-semibold" : "bg-white"
+            }`}
           >
             クローズ済み（{closedTasksSorted.length}）
           </button>
         </div>
 
         {/* Add form */}
-        <div className="flex flex-wrap gap-2 mb-6">
+        <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 mb-6">
           <input
-            className="flex-1 min-w-[200px] border p-2 rounded"
+            className={`${inputBase} sm:col-span-12`}
             value={newText}
             onChange={(e) => setNewText(e.target.value)}
             placeholder="タスクを入力"
           />
 
-          {/* ✅ due date/time (separate states) */}
-          <div className="flex flex-wrap gap-2">
-            <input
-              type="text"
-              inputMode="numeric"
-              className="border p-2 rounded w-[160px]"
-              placeholder="日付 2026-02-23 / 20260223"
-              value={newDueDateDate}
-              onChange={(e) => setNewDueDateDate(e.target.value)} // ✅ no normalize here (keep typing)
-              onBlur={(e) => setNewDueDateDate(normalizeDateInput(e.target.value))} // ✅ normalize on blur
-            />
-            <input
-              type="text"
-              inputMode="numeric"
-              className="border p-2 rounded w-[140px]"
-              placeholder="時刻 16:45 / 1645"
-              value={newDueDateTime}
-              onChange={(e) => setNewDueDateTime(e.target.value)} // ✅ keep typing
-              onBlur={(e) => setNewDueDateTime(normalizeTimeInput(e.target.value))} // ✅ normalize on blur
-            />
-          </div>
+          {(() => {
+            const { date, time } = splitDateTimeLocalToText(newDueDate);
 
-          <input
-            className="border p-2 rounded min-w-[140px]"
-            value={newStatus}
-            onChange={(e) => setNewStatus(e.target.value)}
-            placeholder="ステータス（自由）"
-          />
+            return (
+              <>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className={`${inputBase} sm:col-span-4`}
+                  placeholder="日付 2026-02-23 / 20260223"
+                  value={date}
+                  onChange={(e) => {
+                    const d = normalizeDateInput(e.target.value);
+                    setNewDueDate(combineDateTimeLocalFromText(d, time));
+                  }}
+                />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className={`${inputBase} sm:col-span-4`}
+                  placeholder="時刻 16:45 / 1645"
+                  value={time}
+                  onChange={(e) => {
+                    const t = normalizeTimeInput(e.target.value);
+                    setNewDueDate(combineDateTimeLocalFromText(date, t));
+                  }}
+                />
+                <input
+                  className={`${inputBase} sm:col-span-4`}
+                  value={newStatus}
+                  onChange={(e) => setNewStatus(e.target.value)}
+                  placeholder="ステータス（自由）"
+                />
+              </>
+            );
+          })()}
 
-          <button onClick={addTask} className="bg-blue-500 text-white px-4 rounded">
+          <button
+            onClick={addTask}
+            className="sm:col-span-12 bg-blue-600 text-white py-3 rounded-xl font-semibold active:scale-[0.99]"
+          >
             追加
           </button>
         </div>
 
         {/* List */}
-        <div className="space-y-2">
+        <div className="space-y-3">
           {list.map((task) => (
             <button
               key={task.id}
@@ -700,18 +704,20 @@ export default function Home() {
                   : ""
               }
             >
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="flex-1 min-w-[220px] font-semibold">{task.text}</div>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                <div className="flex-1 min-w-0 font-semibold text-gray-900 break-words">
+                  {task.text}
+                </div>
 
-                <div className="text-sm text-gray-700 min-w-[170px]">
+                <div className="text-sm text-gray-800">
                   次回対応: {formatDateTimeLocal(task.dueDate)}
                 </div>
 
-                <div className="text-sm text-gray-700 min-w-[160px]">
+                <div className="text-sm text-gray-800">
                   ステータス: {task.status || "未設定"}
                 </div>
 
-                <div className="text-xs text-gray-500">
+                <div className="text-xs text-gray-600">
                   経緯: {task.history.filter((h) => !h.deletedAt).length}件
                 </div>
               </div>
@@ -719,8 +725,10 @@ export default function Home() {
           ))}
 
           {list.length === 0 && (
-            <div className="text-gray-500">
-              {tab === "open" ? "進行中タスクがありません" : "クローズ済みタスクがありません"}
+            <div className="text-gray-600">
+              {tab === "open"
+                ? "進行中タスクがありません"
+                : "クローズ済みタスクがありません"}
             </div>
           )}
         </div>
@@ -729,16 +737,21 @@ export default function Home() {
       {/* Modal */}
       {editingTask && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 overflow-y-auto"
+          className="fixed inset-0 bg-black/50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
           onClick={() => setEditingId(null)}
         >
           <div
-            className="w-full max-w-3xl bg-white rounded shadow p-5 max-h-[90vh] overflow-hidden flex flex-col"
+            className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col text-gray-800"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold">タスク詳細</h2>
-              <button onClick={() => setEditingId(null)} className="text-gray-500 hover:text-gray-800">
+              <h2 className="text-xl sm:text-2xl font-bold text-gray-900">
+                タスク詳細
+              </h2>
+              <button
+                onClick={() => setEditingId(null)}
+                className="text-gray-600 hover:text-gray-900 text-xl"
+              >
                 ✕
               </button>
             </div>
@@ -747,51 +760,58 @@ export default function Home() {
               {/* Task fields */}
               <div className="space-y-3">
                 <label className="block">
-                  <div className="text-sm text-gray-600 mb-1">タスク名</div>
-                  <input className="w-full border p-2 rounded" value={editText} onChange={(e) => setEditText(e.target.value)} />
+                  <div className="text-sm text-gray-700 mb-1">タスク名</div>
+                  <input
+                    className={`w-full ${inputBase}`}
+                    value={editText}
+                    onChange={(e) => setEditText(e.target.value)}
+                  />
                 </label>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <label className="block">
-                    <div className="text-sm text-gray-600 mb-1">次回対応日時</div>
-
-                    {/* ✅ due date/time (separate states) */}
-                    <div className="flex flex-wrap gap-2">
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        className="border p-2 rounded w-[160px]"
-                        placeholder="日付 2026-02-23 / 20260223"
-                        value={editDueDateDate}
-                        onChange={(e) => setEditDueDateDate(e.target.value)}
-                        onBlur={(e) => setEditDueDateDate(normalizeDateInput(e.target.value))}
-                      />
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        className="border p-2 rounded w-[140px]"
-                        placeholder="時刻 16:45 / 1645"
-                        value={editDueDateTime}
-                        onChange={(e) => setEditDueDateTime(e.target.value)}
-                        onBlur={(e) => setEditDueDateTime(normalizeTimeInput(e.target.value))}
-                      />
+                    <div className="text-sm text-gray-700 mb-1">
+                      次回対応日時
                     </div>
 
-                    {/* ✅ optional: show validation hint */}
-                    <div className="text-xs text-gray-500 mt-1">
-                      {(() => {
-                        const iso = combineDateTimeLocalFromText(editDueDateDate, editDueDateTime);
-                        if (!editDueDateDate && !editDueDateTime) return "未設定のまま保存できます";
-                        if (iso) return `保存される値: ${iso.replace("T", " ")}`;
-                        return "※日付/時刻が不完全です（保存すると未設定になります）";
-                      })()}
-                    </div>
+                    {(() => {
+                      const { date, time } = splitDateTimeLocalToText(editDueDate);
+
+                      return (
+                        <div className="flex flex-wrap gap-2">
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            className={`${inputBase} w-[160px]`}
+                            placeholder="日付 2026-02-23 / 20260223"
+                            value={date}
+                            onChange={(e) => {
+                              const d = normalizeDateInput(e.target.value);
+                              setEditDueDate(combineDateTimeLocalFromText(d, time));
+                            }}
+                          />
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            className={`${inputBase} w-[140px]`}
+                            placeholder="時刻 16:45 / 1645"
+                            value={time}
+                            onChange={(e) => {
+                              const t = normalizeTimeInput(e.target.value);
+                              setEditDueDate(combineDateTimeLocalFromText(date, t));
+                            }}
+                          />
+                        </div>
+                      );
+                    })()}
                   </label>
 
                   <label className="block">
-                    <div className="text-sm text-gray-600 mb-1">ステータス（自由）</div>
+                    <div className="text-sm text-gray-700 mb-1">
+                      ステータス（自由）
+                    </div>
                     <input
-                      className="w-full border p-2 rounded"
+                      className={`w-full ${inputBase}`}
                       value={editStatus}
                       onChange={(e) => setEditStatus(e.target.value)}
                       placeholder="例: 対応中 / 保留 / 確認待ち"
@@ -800,56 +820,80 @@ export default function Home() {
                 </div>
 
                 {/* History add */}
-                <div className="border rounded p-3 bg-gray-50">
-                  <div className="font-semibold mb-2">対応履歴を追加</div>
+                <div className="border rounded-xl p-3 bg-gray-50">
+                  <div className="font-semibold mb-2 text-gray-900">
+                    対応履歴を追加
+                  </div>
 
                   <div className="flex flex-wrap items-center gap-3 mb-2">
-                    <div className="text-sm text-gray-600">種類：</div>
+                    <div className="text-sm text-gray-700">種類：</div>
 
-                    <label className="flex items-center gap-1 text-sm">
-                      <input type="radio" name="histType" checked={histType === "email"} onChange={() => setHistType("email")} />
+                    <label className="flex items-center gap-1 text-sm text-gray-800">
+                      <input
+                        type="radio"
+                        name="histType"
+                        checked={histType === "email"}
+                        onChange={() => setHistType("email")}
+                      />
                       📧 メール
                     </label>
 
-                    <label className="flex items-center gap-1 text-sm">
-                      <input type="radio" name="histType" checked={histType === "phone"} onChange={() => setHistType("phone")} />
+                    <label className="flex items-center gap-1 text-sm text-gray-800">
+                      <input
+                        type="radio"
+                        name="histType"
+                        checked={histType === "phone"}
+                        onChange={() => setHistType("phone")}
+                      />
                       📞 電話
                     </label>
 
-                    <label className="flex items-center gap-1 text-sm">
-                      <input type="radio" name="histType" checked={histType === "other"} onChange={() => setHistType("other")} />
+                    <label className="flex items-center gap-1 text-sm text-gray-800">
+                      <input
+                        type="radio"
+                        name="histType"
+                        checked={histType === "other"}
+                        onChange={() => setHistType("other")}
+                      />
                       📝 その他
                     </label>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                     <input
-                      className="border p-2 rounded"
+                      className={`${inputBase}`}
                       value={histSubject}
                       onChange={(e) => setHistSubject(e.target.value)}
                       placeholder="件名（全タイプ共通）"
                     />
-                    <button onClick={addHistory} className="bg-blue-500 text-white px-4 rounded">
+                    <button
+                      onClick={addHistory}
+                      className="bg-blue-600 text-white px-4 py-3 rounded-xl font-semibold active:scale-[0.99]"
+                    >
                       追加
                     </button>
                   </div>
 
                   <textarea
-                    className="mt-2 w-full border p-2 rounded min-h-[90px]"
+                    className={`mt-2 w-full ${inputBase} min-h-[90px]`}
                     value={histNote}
                     onChange={(e) => setHistNote(e.target.value)}
-                    placeholder="本文（例: 2/23 10:22 状況確認の連絡。返信待ち。)"
+                    placeholder="本文（例: 3/1 11:00 振込確認。未着のため再連絡予定。)"
                   />
-                  <div className="text-xs text-gray-500 mt-1">※「件名」か「本文」のどちらかが入っていれば追加できます</div>
+                  <div className="text-xs text-gray-600 mt-1">
+                    ※「件名」か「本文」のどちらかが入っていれば追加できます
+                  </div>
                 </div>
 
                 {/* History list */}
-                <div className="border rounded p-3 bg-white">
-                  <div className="font-semibold mb-2">対応履歴</div>
+                <div className="border rounded-xl p-3 bg-white">
+                  <div className="font-semibold mb-2 text-gray-900">対応履歴</div>
 
                   <div className="flex flex-col max-h-[320px]">
                     {editingTask.history.length === 0 ? (
-                      <div className="text-sm text-gray-500">まだ履歴がありません</div>
+                      <div className="text-sm text-gray-600">
+                        まだ履歴がありません
+                      </div>
                     ) : (
                       <ul className="space-y-2 overflow-y-auto pr-1">
                         {[...editingTask.history]
@@ -858,16 +902,23 @@ export default function Home() {
                           .map((h) => {
                             const isDeleted = !!h.deletedAt;
                             const isEditing = historyEditingId === h.id;
-                            const remaining = h.deletedAt ? remainingMsUntilHardDelete(h.deletedAt) : 0;
+                            const remaining = h.deletedAt
+                              ? remainingMsUntilHardDelete(h.deletedAt)
+                              : 0;
 
                             return (
-                              <li key={h.id} className={`border rounded p-2 ${isDeleted ? "opacity-60 bg-gray-50" : "bg-white"}`}>
+                              <li
+                                key={h.id}
+                                className={`border rounded-xl p-3 ${
+                                  isDeleted ? "opacity-70 bg-gray-50" : "bg-white"
+                                }`}
+                              >
                                 <div className="flex items-start justify-between gap-2">
                                   <div className="min-w-0 flex-1">
-                                    <div className="text-xs text-gray-500">
+                                    <div className="text-xs text-gray-600">
                                       {formatIsoToYmdHm(h.at)}{" "}
                                       {isDeleted && h.deletedAt ? (
-                                        <span className="ml-2 text-red-600">
+                                        <span className="ml-2 text-red-700">
                                           削除済み（あと{formatRemaining(remaining)}で完全削除）
                                         </span>
                                       ) : null}
@@ -875,54 +926,69 @@ export default function Home() {
 
                                     {!isEditing ? (
                                       <>
-                                        <div className="text-sm font-semibold truncate">
-                                          {typeIcon(h.type)} {h.subject || "（件名なし）"}
+                                        <div className="text-sm font-semibold truncate text-gray-900">
+                                          {typeIcon(h.type)}{" "}
+                                          {h.subject || "（件名なし）"}
                                         </div>
-                                        <div className="text-sm whitespace-pre-wrap">{h.note || "（本文なし）"}</div>
+                                        <div className="text-sm whitespace-pre-wrap text-gray-800">
+                                          {h.note || "（本文なし）"}
+                                        </div>
                                       </>
                                     ) : (
                                       <div className="mt-2 space-y-2">
                                         <div className="flex flex-wrap items-center gap-3">
-                                          <div className="text-sm text-gray-600">種類：</div>
-                                          <label className="flex items-center gap-1 text-sm">
+                                          <div className="text-sm text-gray-700">
+                                            種類：
+                                          </div>
+                                          <label className="flex items-center gap-1 text-sm text-gray-800">
                                             <input
                                               type="radio"
                                               name={`editType-${h.id}`}
                                               checked={histEditType === "email"}
-                                              onChange={() => setHistEditType("email")}
+                                              onChange={() =>
+                                                setHistEditType("email")
+                                              }
                                             />
                                             📧
                                           </label>
-                                          <label className="flex items-center gap-1 text-sm">
+                                          <label className="flex items-center gap-1 text-sm text-gray-800">
                                             <input
                                               type="radio"
                                               name={`editType-${h.id}`}
                                               checked={histEditType === "phone"}
-                                              onChange={() => setHistEditType("phone")}
+                                              onChange={() =>
+                                                setHistEditType("phone")
+                                              }
                                             />
                                             📞
                                           </label>
-                                          <label className="flex items-center gap-1 text-sm">
+                                          <label className="flex items-center gap-1 text-sm text-gray-800">
                                             <input
                                               type="radio"
                                               name={`editType-${h.id}`}
                                               checked={histEditType === "other"}
-                                              onChange={() => setHistEditType("other")}
+                                              onChange={() =>
+                                                setHistEditType("other")
+                                              }
                                             />
                                             📝
                                           </label>
                                         </div>
 
                                         <input
-                                          className="w-full border p-2 rounded"
+                                          className={`w-full ${inputBase}`}
                                           value={histEditSubject}
-                                          onChange={(e) => setHistEditSubject(e.target.value)}
+                                          onChange={(e) =>
+                                            setHistEditSubject(e.target.value)
+                                          }
                                           placeholder="件名"
                                         />
                                         <textarea
-                                          className="w-full border p-2 rounded min-h-[80px]"
+                                          className={`w-full ${inputBase} min-h-[80px]`}
                                           value={histEditNote}
-                                          onChange={(e) => setHistEditNote(e.target.value)}
+                                          onChange={(e) =>
+                                            setHistEditNote(e.target.value)
+                                          }
                                           placeholder="本文"
                                         />
                                       </div>
@@ -939,7 +1005,7 @@ export default function Home() {
                                               e.stopPropagation();
                                               beginEditHistory(h);
                                             }}
-                                            className="text-sm border px-2 py-1 rounded hover:bg-gray-50"
+                                            className="text-sm border px-3 py-2 rounded-xl hover:bg-gray-50 text-gray-800"
                                           >
                                             編集
                                           </button>
@@ -951,7 +1017,7 @@ export default function Home() {
                                                 e.stopPropagation();
                                                 saveHistoryEdit(h.id);
                                               }}
-                                              className="text-sm bg-blue-500 text-white px-2 py-1 rounded"
+                                              className="text-sm bg-blue-600 text-white px-3 py-2 rounded-xl font-semibold"
                                             >
                                               保存
                                             </button>
@@ -961,7 +1027,7 @@ export default function Home() {
                                                 e.stopPropagation();
                                                 cancelEditHistory();
                                               }}
-                                              className="text-sm border px-2 py-1 rounded"
+                                              className="text-sm border px-3 py-2 rounded-xl text-gray-800"
                                             >
                                               キャンセル
                                             </button>
@@ -974,7 +1040,7 @@ export default function Home() {
                                             e.stopPropagation();
                                             softDeleteHistory(h.id);
                                           }}
-                                          className="text-sm text-red-600 border px-2 py-1 rounded hover:bg-red-50"
+                                          className="text-sm text-red-700 border px-3 py-2 rounded-xl hover:bg-red-50"
                                         >
                                           削除
                                         </button>
@@ -986,7 +1052,7 @@ export default function Home() {
                                           e.stopPropagation();
                                           restoreHistory(h.id);
                                         }}
-                                        className="text-sm border px-2 py-1 rounded hover:bg-gray-50"
+                                        className="text-sm border px-3 py-2 rounded-xl hover:bg-gray-50 text-gray-800"
                                       >
                                         復元
                                       </button>
@@ -1002,37 +1068,52 @@ export default function Home() {
                 </div>
 
                 {/* Metadata */}
-                <div className="text-xs text-gray-500">
-                  作成: {formatIsoToYmdHm(editingTask.createdAt)} / 更新: {formatIsoToYmdHm(editingTask.updatedAt)}
-                  {editingTask.state === "closed" && editingTask.closedAt ? ` / クローズ: ${formatIsoToYmdHm(editingTask.closedAt)}` : ""}
+                <div className="text-xs text-gray-600">
+                  作成: {formatIsoToYmdHm(editingTask.createdAt)} / 更新:{" "}
+                  {formatIsoToYmdHm(editingTask.updatedAt)}
+                  {editingTask.state === "closed" && editingTask.closedAt
+                    ? ` / クローズ: ${formatIsoToYmdHm(editingTask.closedAt)}`
+                    : ""}
                 </div>
               </div>
             </div>
 
             {/* Footer buttons */}
             <div className="pt-4 mt-4 border-t flex items-center justify-between gap-2">
-              <button onClick={() => deleteTask(editingTask.id)} className="text-red-600 hover:text-red-800">
+              <button
+                onClick={() => deleteTask(editingTask.id)}
+                className="text-red-700 hover:text-red-900 font-semibold"
+              >
                 タスク削除
               </button>
 
               <div className="flex flex-wrap gap-2">
                 {editingTask.state === "open" ? (
-                  <button onClick={() => closeTask(editingTask.id)} className="border px-4 py-2 rounded hover:bg-gray-50">
+                  <button
+                    onClick={() => closeTask(editingTask.id)}
+                    className="border px-4 py-3 rounded-xl hover:bg-gray-50 text-gray-800"
+                  >
                     クローズ
                   </button>
                 ) : (
-                  <button onClick={() => reopenTask(editingTask.id)} className="border px-4 py-2 rounded hover:bg-gray-50">
+                  <button
+                    onClick={() => reopenTask(editingTask.id)}
+                    className="border px-4 py-3 rounded-xl hover:bg-gray-50 text-gray-800"
+                  >
                     再オープン
                   </button>
                 )}
 
-                <button onClick={() => setEditingId(null)} className="border px-4 py-2 rounded">
+                <button
+                  onClick={() => setEditingId(null)}
+                  className="border px-4 py-3 rounded-xl text-gray-800"
+                >
                   閉じる
                 </button>
 
                 <button
                   onClick={saveTaskEdits}
-                  className="bg-blue-500 text-white px-4 py-2 rounded"
+                  className="bg-blue-600 text-white px-5 py-3 rounded-xl font-semibold disabled:opacity-50"
                   disabled={editText.trim() === ""}
                   title={editText.trim() === "" ? "タスク名は必須です" : ""}
                 >
@@ -1041,7 +1122,11 @@ export default function Home() {
               </div>
             </div>
 
-            {editText.trim() === "" && <div className="text-sm text-red-600 mt-2">※タスク名が空だと保存できません</div>}
+            {editText.trim() === "" && (
+              <div className="text-sm text-red-700 mt-2">
+                ※タスク名が空だと保存できません
+              </div>
+            )}
           </div>
         </div>
       )}
