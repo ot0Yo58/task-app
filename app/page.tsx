@@ -16,6 +16,7 @@ import React, { useEffect, useMemo, useState } from "react";
  *    - editable
  *    - soft delete first; permanent delete after 12 hours; can restore within 12 hours
  * - LocalStorage persistence + safe migration from older shapes
+ * - Manual backup/restore (JSON copy/paste) with merge
  */
 
 type HistoryType = "email" | "phone" | "other";
@@ -275,6 +276,87 @@ function taskRowTone(task: Task) {
   return "normal";
 }
 
+/** =========================
+ * Manual backup/restore merge
+ * ========================= */
+function msOr0(iso: string | undefined) {
+  if (!iso) return 0;
+  const v = Date.parse(iso);
+  return Number.isFinite(v) ? v : 0;
+}
+
+function mergeHistory(a: HistoryEntry[], b: HistoryEntry[]) {
+  // unique by history.id, prefer newer "at" if duplicates (rare)
+  const map = new Map<string, HistoryEntry>();
+  for (const h of a) map.set(h.id, h);
+  for (const h of b) {
+    const cur = map.get(h.id);
+    if (!cur) {
+      map.set(h.id, h);
+      continue;
+    }
+    // pick later at (or keep existing if invalid)
+    const curMs = msOr0(cur.at);
+    const nextMs = msOr0(h.at);
+    map.set(h.id, nextMs >= curMs ? h : cur);
+  }
+  return Array.from(map.values());
+}
+
+function mergeTasks(current: Task[], incoming: Task[]) {
+  const map = new Map<number, Task>();
+  for (const t of current) map.set(t.id, t);
+
+  for (const inc of incoming) {
+    const cur = map.get(inc.id);
+    if (!cur) {
+      map.set(inc.id, inc);
+      continue;
+    }
+
+    // choose newer by updatedAt
+    const curUpdated = msOr0(cur.updatedAt);
+    const incUpdated = msOr0(inc.updatedAt);
+
+    const newer = incUpdated >= curUpdated ? inc : cur;
+    const older = newer === inc ? cur : inc;
+
+    // merge histories (keep all unique)
+    const mergedHistory = mergeHistory(older.history ?? [], newer.history ?? []);
+
+    // keep newer fields, but ensure history merged
+    map.set(inc.id, { ...newer, history: mergedHistory });
+  }
+
+  return Array.from(map.values());
+}
+
+async function copyToClipboard(text: string) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+
+  // fallback
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
 
@@ -308,6 +390,14 @@ export default function Home() {
   const [histEditType, setHistEditType] = useState<HistoryType>("email");
   const [histEditSubject, setHistEditSubject] = useState("");
   const [histEditNote, setHistEditNote] = useState("");
+
+  /** backup/restore UI state */
+  const [showBackup, setShowBackup] = useState(false);
+  const [showRestore, setShowRestore] = useState(false);
+  const [backupJson, setBackupJson] = useState("");
+  const [restoreJson, setRestoreJson] = useState("");
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   // Initial load + cleanup
   useEffect(() => {
@@ -357,6 +447,13 @@ export default function Home() {
     setHistEditSubject("");
     setHistEditNote("");
   }, [editingTask?.id]);
+
+  // tiny toast auto-hide
+  useEffect(() => {
+    if (!toast) return;
+    const id = window.setTimeout(() => setToast(null), 1800);
+    return () => window.clearTimeout(id);
+  }, [toast]);
 
   const openTasksSorted = useMemo(() => {
     const open = tasks.filter((t) => t.state === "open");
@@ -590,6 +687,52 @@ export default function Home() {
     );
   }
 
+  /** backup/restore handlers */
+  function openBackup() {
+    const json = JSON.stringify(tasks, null, 2);
+    setBackupJson(json);
+    setShowBackup(true);
+  }
+
+  async function copyBackup() {
+    const ok = await copyToClipboard(backupJson);
+    setToast(ok ? "コピーしました" : "コピーに失敗しました（手動で選択してコピーしてね）");
+  }
+
+  function openRestore() {
+    setRestoreError(null);
+    setRestoreJson("");
+    setShowRestore(true);
+  }
+
+  function doRestoreMerge() {
+    setRestoreError(null);
+    const rawText = restoreJson.trim();
+    if (!rawText) {
+      setRestoreError("JSONが空です。PC側のバックアップJSONを貼り付けてください。");
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(rawText);
+      const incoming = cleanup(normalizeTasks(parsed));
+      if (incoming.length === 0) {
+        setRestoreError("取り込めるタスクが見つかりませんでした（JSON形式を確認してください）。");
+        return;
+      }
+
+      setTasks((prev) => {
+        const merged = cleanup(mergeTasks(prev, incoming));
+        return merged;
+      });
+
+      setShowRestore(false);
+      setToast(`復元OK（${incoming.length}件を取り込み）`);
+    } catch {
+      setRestoreError("JSONの解析に失敗しました。コピー途中で欠けていないか確認してください。");
+    }
+  }
+
   // Styling helpers
   function rowClass(task: Task) {
     const base =
@@ -609,9 +752,27 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gray-50 p-4 sm:p-6 text-gray-800">
       <div className="max-w-5xl mx-auto bg-white shadow p-4 sm:p-6 rounded-2xl">
-        <h1 className="text-2xl sm:text-3xl font-bold mb-4 text-gray-800">
-          タスク管理
-        </h1>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-800">タスク管理</h1>
+
+          {/* Backup / Restore buttons */}
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={openBackup}
+              className="border px-4 py-2 rounded-xl hover:bg-gray-50 text-gray-800"
+              title="PC→スマホの移行に使う（JSONをコピー）"
+            >
+              バックアップ（コピー）
+            </button>
+            <button
+              onClick={openRestore}
+              className="border px-4 py-2 rounded-xl hover:bg-gray-50 text-gray-800"
+              title="PCのJSONを貼り付けて取り込み"
+            >
+              復元（貼り付け）
+            </button>
+          </div>
+        </div>
 
         {/* Tabs */}
         <div className="flex gap-2 mb-5">
@@ -734,7 +895,119 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Modal */}
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-black/80 text-white px-4 py-2 rounded-xl text-sm">
+          {toast}
+        </div>
+      )}
+
+      {/* Backup Modal */}
+      {showBackup && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center p-3 sm:p-4"
+          onClick={() => setShowBackup(false)}
+        >
+          <div
+            className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-lg font-bold text-gray-900">バックアップ（JSON）</div>
+              <button
+                onClick={() => setShowBackup(false)}
+                className="text-gray-600 hover:text-gray-900 text-xl"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="text-sm text-gray-700 mb-2">
+              PCでこのJSONをコピーして、スマホ側の「復元」に貼り付けて取り込みます。
+            </div>
+
+            <textarea
+              className="w-full flex-1 border rounded-xl p-3 font-mono text-xs text-gray-800 bg-white"
+              value={backupJson}
+              readOnly
+            />
+
+            <div className="mt-3 flex flex-wrap gap-2 justify-end">
+              <button
+                onClick={copyBackup}
+                className="bg-blue-600 text-white px-4 py-3 rounded-xl font-semibold"
+              >
+                JSONをコピー
+              </button>
+              <button
+                onClick={() => setShowBackup(false)}
+                className="border px-4 py-3 rounded-xl text-gray-800"
+              >
+                閉じる
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Restore Modal */}
+      {showRestore && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center p-3 sm:p-4"
+          onClick={() => setShowRestore(false)}
+        >
+          <div
+            className="w-full max-w-3xl bg-white rounded-2xl shadow p-4 sm:p-5 max-h-[90vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-lg font-bold text-gray-900">復元（JSON貼り付け）</div>
+              <button
+                onClick={() => setShowRestore(false)}
+                className="text-gray-600 hover:text-gray-900 text-xl"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="text-sm text-gray-700 mb-2">
+              PCでコピーしたバックアップJSONを、ここにそのまま貼り付けてください（マージ取り込み）。
+            </div>
+
+            <textarea
+              className="w-full flex-1 border rounded-xl p-3 font-mono text-xs text-gray-800 bg-white"
+              value={restoreJson}
+              onChange={(e) => setRestoreJson(e.target.value)}
+              placeholder="ここにJSONを貼り付け…"
+            />
+
+            {restoreError && (
+              <div className="mt-2 text-sm text-red-700">{restoreError}</div>
+            )}
+
+            <div className="mt-3 flex flex-wrap gap-2 justify-end">
+              <button
+                onClick={doRestoreMerge}
+                className="bg-blue-600 text-white px-4 py-3 rounded-xl font-semibold"
+              >
+                取り込む（マージ）
+              </button>
+              <button
+                onClick={() => setShowRestore(false)}
+                className="border px-4 py-3 rounded-xl text-gray-800"
+              >
+                キャンセル
+              </button>
+            </div>
+
+            <div className="mt-2 text-xs text-gray-600">
+              ※ 同じIDのタスクがある場合は、更新日時（updatedAt）が新しい方を優先します。履歴は重複を除いて結合します。
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Task detail */}
       {editingTask && (
         <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
@@ -745,9 +1018,7 @@ export default function Home() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl sm:text-2xl font-bold text-gray-900">
-                タスク詳細
-              </h2>
+              <h2 className="text-xl sm:text-2xl font-bold text-gray-900">タスク詳細</h2>
               <button
                 onClick={() => setEditingId(null)}
                 className="text-gray-600 hover:text-gray-900 text-xl"
@@ -770,9 +1041,7 @@ export default function Home() {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <label className="block">
-                    <div className="text-sm text-gray-700 mb-1">
-                      次回対応日時
-                    </div>
+                    <div className="text-sm text-gray-700 mb-1">次回対応日時</div>
 
                     {(() => {
                       const { date, time } = splitDateTimeLocalToText(editDueDate);
@@ -807,9 +1076,7 @@ export default function Home() {
                   </label>
 
                   <label className="block">
-                    <div className="text-sm text-gray-700 mb-1">
-                      ステータス（自由）
-                    </div>
+                    <div className="text-sm text-gray-700 mb-1">ステータス（自由）</div>
                     <input
                       className={`w-full ${inputBase}`}
                       value={editStatus}
@@ -821,9 +1088,7 @@ export default function Home() {
 
                 {/* History add */}
                 <div className="border rounded-xl p-3 bg-gray-50">
-                  <div className="font-semibold mb-2 text-gray-900">
-                    対応履歴を追加
-                  </div>
+                  <div className="font-semibold mb-2 text-gray-900">対応履歴を追加</div>
 
                   <div className="flex flex-wrap items-center gap-3 mb-2">
                     <div className="text-sm text-gray-700">種類：</div>
@@ -891,9 +1156,7 @@ export default function Home() {
 
                   <div className="flex flex-col max-h-[320px]">
                     {editingTask.history.length === 0 ? (
-                      <div className="text-sm text-gray-600">
-                        まだ履歴がありません
-                      </div>
+                      <div className="text-sm text-gray-600">まだ履歴がありません</div>
                     ) : (
                       <ul className="space-y-2 overflow-y-auto pr-1">
                         {[...editingTask.history]
@@ -927,8 +1190,7 @@ export default function Home() {
                                     {!isEditing ? (
                                       <>
                                         <div className="text-sm font-semibold truncate text-gray-900">
-                                          {typeIcon(h.type)}{" "}
-                                          {h.subject || "（件名なし）"}
+                                          {typeIcon(h.type)} {h.subject || "（件名なし）"}
                                         </div>
                                         <div className="text-sm whitespace-pre-wrap text-gray-800">
                                           {h.note || "（本文なし）"}
@@ -937,17 +1199,13 @@ export default function Home() {
                                     ) : (
                                       <div className="mt-2 space-y-2">
                                         <div className="flex flex-wrap items-center gap-3">
-                                          <div className="text-sm text-gray-700">
-                                            種類：
-                                          </div>
+                                          <div className="text-sm text-gray-700">種類：</div>
                                           <label className="flex items-center gap-1 text-sm text-gray-800">
                                             <input
                                               type="radio"
                                               name={`editType-${h.id}`}
                                               checked={histEditType === "email"}
-                                              onChange={() =>
-                                                setHistEditType("email")
-                                              }
+                                              onChange={() => setHistEditType("email")}
                                             />
                                             📧
                                           </label>
@@ -956,9 +1214,7 @@ export default function Home() {
                                               type="radio"
                                               name={`editType-${h.id}`}
                                               checked={histEditType === "phone"}
-                                              onChange={() =>
-                                                setHistEditType("phone")
-                                              }
+                                              onChange={() => setHistEditType("phone")}
                                             />
                                             📞
                                           </label>
@@ -967,9 +1223,7 @@ export default function Home() {
                                               type="radio"
                                               name={`editType-${h.id}`}
                                               checked={histEditType === "other"}
-                                              onChange={() =>
-                                                setHistEditType("other")
-                                              }
+                                              onChange={() => setHistEditType("other")}
                                             />
                                             📝
                                           </label>
@@ -978,17 +1232,13 @@ export default function Home() {
                                         <input
                                           className={`w-full ${inputBase}`}
                                           value={histEditSubject}
-                                          onChange={(e) =>
-                                            setHistEditSubject(e.target.value)
-                                          }
+                                          onChange={(e) => setHistEditSubject(e.target.value)}
                                           placeholder="件名"
                                         />
                                         <textarea
                                           className={`w-full ${inputBase} min-h-[80px]`}
                                           value={histEditNote}
-                                          onChange={(e) =>
-                                            setHistEditNote(e.target.value)
-                                          }
+                                          onChange={(e) => setHistEditNote(e.target.value)}
                                           placeholder="本文"
                                         />
                                       </div>
@@ -1123,9 +1373,7 @@ export default function Home() {
             </div>
 
             {editText.trim() === "" && (
-              <div className="text-sm text-red-700 mt-2">
-                ※タスク名が空だと保存できません
-              </div>
+              <div className="text-sm text-red-700 mt-2">※タスク名が空だと保存できません</div>
             )}
           </div>
         </div>
