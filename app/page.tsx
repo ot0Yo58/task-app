@@ -102,6 +102,32 @@ function combineDateTimeLocalFromText(dateRaw: string, timeRaw: string) {
 function splitDateTimeLocalToText(value: string) {
   if (!value) return { date: "", time: "" };
 
+  const localMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+
+  if (localMatch) {
+    const [, yyyy, mm, dd, hh, mi] = localMatch;
+
+    return {
+      date: `${yyyy}/${mm}/${dd}`,
+      time: `${hh}:${mi}`,
+    };
+  }
+
+  const parsed = new Date(value);
+
+  if (!Number.isNaN(parsed.getTime())) {
+    const yyyy = parsed.getFullYear();
+    const mm = String(parsed.getMonth() + 1).padStart(2, "0");
+    const dd = String(parsed.getDate()).padStart(2, "0");
+    const hh = String(parsed.getHours()).padStart(2, "0");
+    const mi = String(parsed.getMinutes()).padStart(2, "0");
+
+    return {
+      date: `${yyyy}/${mm}/${dd}`,
+      time: `${hh}:${mi}`,
+    };
+  }
+
   const [date, time] = value.split("T");
 
   return {
@@ -137,6 +163,28 @@ function isObject(x: unknown): x is Record<string, unknown> {
 
 function parseDueToMs(dueDate: string): number | null {
   if (!dueDate) return null;
+
+  const localMatch = dueDate.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+
+  if (localMatch) {
+    const [, y, m, d, hh, mm] = localMatch.map(String);
+
+    return new Date(
+      Number(y),
+      Number(m) - 1,
+      Number(d),
+      Number(hh),
+      Number(mm),
+      0,
+      0,
+    ).getTime();
+  }
+
+  const parsed = new Date(dueDate);
+
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.getTime();
+  }
 
   const [datePart, timePart] = dueDate.split("T");
 
@@ -174,6 +222,32 @@ function typeIcon(t: HistoryType) {
 
 function formatDateTimeLocal(value: string) {
   if (!value) return "未設定";
+
+  const localMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+
+  if (localMatch) {
+    const [, yyyy, mm, dd, hh, mi] = localMatch;
+    return `${yyyy}/${mm}/${dd} ${hh}:${mi}`;
+  }
+
+  const slashMatch = value.match(/^(\d{4})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2})/);
+
+  if (slashMatch) {
+    const [, yyyy, mm, dd, hh, mi] = slashMatch;
+    return `${yyyy}/${mm}/${dd} ${hh}:${mi}`;
+  }
+
+  const parsed = new Date(value);
+
+  if (!Number.isNaN(parsed.getTime())) {
+    const yyyy = parsed.getFullYear();
+    const mm = String(parsed.getMonth() + 1).padStart(2, "0");
+    const dd = String(parsed.getDate()).padStart(2, "0");
+    const hh = String(parsed.getHours()).padStart(2, "0");
+    const mi = String(parsed.getMinutes()).padStart(2, "0");
+
+    return `${yyyy}/${mm}/${dd} ${hh}:${mi}`;
+  }
 
   return value.replace("T", " ").replace(/-/g, "/");
 }
@@ -244,7 +318,15 @@ function normalizeTasks(raw: unknown): Task[] {
   const tasks: Task[] = [];
 
   for (const item of raw) {
-    if (!isObject(item) || typeof item.id !== "number") continue;
+    if (!isObject(item)) continue;
+
+    const rawId = item.id;
+    const id =
+      typeof rawId === "number"
+        ? rawId
+        : typeof rawId === "string" && rawId.trim() !== "" && Number.isFinite(Number(rawId))
+          ? Number(rawId)
+          : Date.now() + Math.floor(Math.random() * 100000);
 
     const text = typeof item.text === "string" ? item.text : "";
     const dueDate = typeof item.dueDate === "string" ? item.dueDate : "";
@@ -257,7 +339,7 @@ function normalizeTasks(raw: unknown): Task[] {
     const history = normalizeHistory(item.history);
 
     tasks.push({
-      id: item.id,
+      id,
       text,
       dueDate,
       status,
@@ -627,6 +709,11 @@ export default function Home() {
       if (aBlank && !bBlank) return -1;
       if (!aBlank && bBlank) return 1;
       if (aBlank && bBlank) return b.id - a.id;
+
+      const aMs = parseDueToMs(a.dueDate);
+      const bMs = parseDueToMs(b.dueDate);
+
+      if (aMs !== null && bMs !== null) return aMs - bMs || b.id - a.id;
 
       return a.dueDate.localeCompare(b.dueDate) || b.id - a.id;
     });
