@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type AiMessage = {
   id: string;
@@ -10,18 +10,58 @@ type AiMessage = {
   processedAt: string;
 };
 
+function formatMessageTime(value: string) {
+  if (!value) return "";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mi = String(date.getMinutes()).padStart(2, "0");
+
+  return `${yyyy}/${mm}/${dd} ${hh}:${mi}`;
+}
+
+function sortMessages(messages: AiMessage[]) {
+  return [...messages].sort((a, b) => {
+    const aTime = Date.parse(a.createdAt);
+    const bTime = Date.parse(b.createdAt);
+
+    if (Number.isFinite(aTime) && Number.isFinite(bTime)) {
+      return aTime - bTime;
+    }
+
+    return String(a.createdAt).localeCompare(String(b.createdAt));
+  });
+}
+
 export default function AiChatPage() {
   const [messages, setMessages] = useState<AiMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("未接続");
+  const [lastFetchedAt, setLastFetchedAt] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const fetchingRef = useRef(false);
 
-  const fetchMessages = async () => {
+  const fetchMessages = useCallback(async () => {
+    if (fetchingRef.current) return;
+
+    fetchingRef.current = true;
+
     try {
-      const res = await fetch("/api/ai-messages", {
+      const res = await fetch(`/api/ai-messages?limit=80&ts=${Date.now()}`, {
         method: "GET",
         cache: "no-store",
+        headers: {
+          "Cache-Control": "no-cache",
+        },
       });
 
       const data = await res.json();
@@ -31,22 +71,46 @@ export default function AiChatPage() {
         return;
       }
 
-      setMessages(data.messages || []);
+      const nextMessages = Array.isArray(data.messages)
+        ? sortMessages(data.messages)
+        : [];
+
+      setMessages(nextMessages);
       setStatus("接続中");
+      setLastFetchedAt(formatMessageTime(new Date().toISOString()));
     } catch {
       setStatus("取得に失敗しました");
+    } finally {
+      fetchingRef.current = false;
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchMessages();
 
     const timer = window.setInterval(() => {
       fetchMessages();
-    }, 5000);
+    }, 3000);
 
-    return () => window.clearInterval(timer);
-  }, []);
+    const handleFocus = () => {
+      fetchMessages();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        fetchMessages();
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [fetchMessages]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -61,10 +125,12 @@ export default function AiChatPage() {
     setInput("");
 
     try {
-      const res = await fetch("/api/ai-messages", {
+      const res = await fetch(`/api/ai-messages?ts=${Date.now()}`, {
         method: "POST",
+        cache: "no-store",
         headers: {
           "Content-Type": "application/json",
+          "Cache-Control": "no-cache",
         },
         body: JSON.stringify({ message }),
       });
@@ -90,11 +156,26 @@ export default function AiChatPage() {
       <div className="mx-auto flex min-h-screen max-w-3xl flex-col px-4 py-4">
         <header className="mb-4 rounded-2xl border border-indigo-400/20 bg-slate-900/80 p-4 shadow-lg">
           <p className="text-xs text-indigo-300">Local LLM Chat</p>
+
           <h1 className="text-2xl font-bold text-white">AI秘書チャット</h1>
+
           <p className="mt-2 text-sm text-slate-300">
             スマホから送った内容を、PCのOllamaが処理して返信します。
           </p>
-          <p className="mt-2 text-xs text-slate-400">状態：{status}</p>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+            <span>状態：{status}</span>
+
+            {lastFetchedAt && <span>最終取得：{lastFetchedAt}</span>}
+
+            <button
+              type="button"
+              onClick={fetchMessages}
+              className="rounded-full border border-slate-600 px-3 py-1 text-slate-200 hover:bg-slate-800"
+            >
+              手動更新
+            </button>
+          </div>
         </header>
 
         <section className="flex-1 space-y-3 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900/50 p-3">
@@ -119,14 +200,17 @@ export default function AiChatPage() {
                     }`}
                   >
                     <div className="mb-1 text-[11px] opacity-70">
-                      {isUser ? "あなた" : "ローカルAI"} / {item.createdAt}
+                      {isUser ? "あなた" : "ローカルAI"} /{" "}
+                      {formatMessageTime(item.createdAt)}
                     </div>
+
                     {item.message}
                   </div>
                 </div>
               );
             })
           )}
+
           <div ref={bottomRef} />
         </section>
 
@@ -145,7 +229,9 @@ export default function AiChatPage() {
             <button
               type="button"
               onClick={() =>
-                setInput("ディープモードで考えて、今のタスクの優先順位を整理して")
+                setInput(
+                  "ディープモードで考えて、今のタスクの優先順位を整理して",
+                )
               }
               className="rounded-full border border-purple-400/40 px-3 py-1 text-xs text-purple-200"
             >
@@ -154,9 +240,7 @@ export default function AiChatPage() {
 
             <button
               type="button"
-              onClick={() =>
-                setInput("このタスク管理AIの次の一手を教えて")
-              }
+              onClick={() => setInput("このタスク管理AIの次の一手を教えて")}
               className="rounded-full border border-slate-600 px-3 py-1 text-xs text-slate-200"
             >
               次の一手
@@ -182,7 +266,7 @@ export default function AiChatPage() {
               disabled={loading || !input.trim()}
               className="rounded-xl bg-indigo-500 px-4 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
-              送信
+              {loading ? "送信中" : "送信"}
             </button>
           </div>
 
