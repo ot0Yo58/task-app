@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+type AiMode = "normal" | "deep";
+
 type AiMessage = {
   id: string;
   role: "user" | "assistant" | string;
@@ -41,9 +43,54 @@ function sortMessages(messages: AiMessage[]) {
   });
 }
 
+function stripControlBlock(message: string) {
+  return message
+    .replace(
+      /^\[\[TASK_AI_CONTROL\]\][\s\S]*?\[\[END_TASK_AI_CONTROL\]\]\n?/,
+      "",
+    )
+    .trim();
+}
+
+function buildWorkerMessage({
+  mode,
+  confirmBeforeEdit,
+  message,
+}: {
+  mode: AiMode;
+  confirmBeforeEdit: boolean;
+  message: string;
+}) {
+  const modeLabel = mode === "deep" ? "ディープモード" : "通常モード";
+
+  const confirmRule = confirmBeforeEdit
+    ? [
+        "タスク編集確認ルール：有効",
+        "タスクの追加・編集・クローズ・再オープン・履歴追加・次回対応日時変更など、タスク管理データを書き換える操作が必要な場合は、すぐに実行しないでください。",
+        "まず『編集確認』として、変更予定の内容を箇条書きで提示してください。",
+        "ユーザーが『実行して』『OK』『それで登録して』『反映して』など、明確に承認した場合だけ実行してください。",
+        "削除系の操作は実行禁止です。削除が必要そうな場合も、提案だけにしてください。",
+      ].join("\n")
+    : [
+        "タスク編集確認ルール：無効",
+        "ただし、削除系の操作は実行禁止です。",
+      ].join("\n");
+
+  return [
+    "[[TASK_AI_CONTROL]]",
+    `mode=${mode}`,
+    `${modeLabel}で考えてください。`,
+    confirmRule,
+    "[[END_TASK_AI_CONTROL]]",
+    message,
+  ].join("\n");
+}
+
 export default function AiChatPage() {
   const [messages, setMessages] = useState<AiMessage[]>([]);
   const [input, setInput] = useState("");
+  const [mode, setMode] = useState<AiMode>("normal");
+  const [confirmBeforeEdit, setConfirmBeforeEdit] = useState(true);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("未接続");
   const [lastFetchedAt, setLastFetchedAt] = useState("");
@@ -121,6 +168,12 @@ export default function AiChatPage() {
 
     if (!message) return;
 
+    const workerMessage = buildWorkerMessage({
+      mode,
+      confirmBeforeEdit,
+      message,
+    });
+
     setLoading(true);
     setInput("");
 
@@ -132,7 +185,7 @@ export default function AiChatPage() {
           "Content-Type": "application/json",
           "Cache-Control": "no-cache",
         },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message: workerMessage }),
       });
 
       const data = await res.json();
@@ -151,6 +204,8 @@ export default function AiChatPage() {
     }
   };
 
+  const currentModeLabel = mode === "deep" ? "ディープモード" : "通常モード";
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto flex min-h-screen max-w-3xl flex-col px-4 py-4">
@@ -162,6 +217,53 @@ export default function AiChatPage() {
           <p className="mt-2 text-sm text-slate-300">
             スマホから送った内容を、PCのOllamaが処理して返信します。
           </p>
+
+          <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/70 p-3">
+            <p className="mb-2 text-xs font-bold text-slate-300">
+              現在モード：{currentModeLabel}
+            </p>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setMode("normal")}
+                className={`rounded-xl border px-3 py-2 text-sm font-bold ${
+                  mode === "normal"
+                    ? "border-indigo-400 bg-indigo-500 text-white"
+                    : "border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+                }`}
+              >
+                通常モード
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setMode("deep")}
+                className={`rounded-xl border px-3 py-2 text-sm font-bold ${
+                  mode === "deep"
+                    ? "border-purple-400 bg-purple-500 text-white"
+                    : "border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800"
+                }`}
+              >
+                ディープモード
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setConfirmBeforeEdit((current) => !current)}
+              className={`mt-3 w-full rounded-xl border px-3 py-2 text-left text-xs ${
+                confirmBeforeEdit
+                  ? "border-emerald-400/60 bg-emerald-500/10 text-emerald-200"
+                  : "border-yellow-400/60 bg-yellow-500/10 text-yellow-100"
+              }`}
+            >
+              編集前確認：{confirmBeforeEdit ? "ON" : "OFF"}
+              <span className="mt-1 block text-[11px] opacity-80">
+                ONの場合、AIがタスクを編集する前に「変更予定の内容」を確認するよう指示します。
+              </span>
+            </button>
+          </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-400">
             <span>状態：{status}</span>
@@ -186,6 +288,7 @@ export default function AiChatPage() {
           ) : (
             messages.map((item) => {
               const isUser = item.role === "user";
+              const displayMessage = stripControlBlock(item.message);
 
               return (
                 <div
@@ -204,7 +307,7 @@ export default function AiChatPage() {
                       {formatMessageTime(item.createdAt)}
                     </div>
 
-                    {item.message}
+                    {displayMessage}
                   </div>
                 </div>
               );
@@ -218,9 +321,10 @@ export default function AiChatPage() {
           <div className="mb-2 flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() =>
-                setInput("通常モードで考えて、今日やることを3つ教えて")
-              }
+              onClick={() => {
+                setMode("normal");
+                setInput("今日やることを3つ教えて");
+              }}
               className="rounded-full border border-indigo-400/40 px-3 py-1 text-xs text-indigo-200"
             >
               今日やること
@@ -228,11 +332,10 @@ export default function AiChatPage() {
 
             <button
               type="button"
-              onClick={() =>
-                setInput(
-                  "ディープモードで考えて、今のタスクの優先順位を整理して",
-                )
-              }
+              onClick={() => {
+                setMode("deep");
+                setInput("今のタスクの優先順位を整理して");
+              }}
               className="rounded-full border border-purple-400/40 px-3 py-1 text-xs text-purple-200"
             >
               ディープ分析
@@ -240,11 +343,33 @@ export default function AiChatPage() {
 
             <button
               type="button"
-              onClick={() => setInput("このタスク管理AIの次の一手を教えて")}
+              onClick={() => {
+                setMode("normal");
+                setInput("このタスク管理AIの次の一手を教えて");
+              }}
               className="rounded-full border border-slate-600 px-3 py-1 text-xs text-slate-200"
             >
               次の一手
             </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setMode("deep");
+                setConfirmBeforeEdit(true);
+                setInput("タスクを編集したい。まず変更予定の内容を確認して");
+              }}
+              className="rounded-full border border-emerald-400/40 px-3 py-1 text-xs text-emerald-200"
+            >
+              編集確認
+            </button>
+          </div>
+
+          <div className="mb-2 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-400">
+            送信時に自動で「{currentModeLabel}」として送ります。
+            {confirmBeforeEdit
+              ? " タスク編集が必要な場合は、AIに先に確認内容を出すよう指示します。"
+              : " 編集前確認はOFFです。削除系は禁止のままです。"}
           </div>
 
           <div className="flex gap-2">
@@ -256,7 +381,7 @@ export default function AiChatPage() {
                   sendMessage();
                 }
               }}
-              placeholder="AIに聞きたいことを入力。例：通常モードで考えて、今日何すればいい？"
+              placeholder="AIに聞きたいことを入力。例：明日9時に〇〇へ電話するタスクを追加したい"
               className="min-h-24 flex-1 resize-none rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-indigo-400"
             />
 
