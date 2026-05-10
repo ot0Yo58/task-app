@@ -1,36 +1,180 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Task App
 
-## Getting Started
+## 概要
 
-First, run the development server:
+Task App は、個人の業務管理を想定して作成したタスク管理アプリです。
+
+単にタスクを登録するだけではなく、タスクごとに「メール」「電話」「その他」の対応履歴を残せるようにし、後から対応経緯を確認しやすい構成にしています。
+
+日々の業務で発生する「次に何をするか」「いつ対応するか」「過去にどんな連絡をしたか」をまとめて管理することを目的としています。
+
+## 公開URL
+
+https://task-app-kappa-eight.vercel.app
+
+## 使用技術
+
+- Next.js
+- React
+- TypeScript
+- Tailwind CSS
+- localStorage
+- API Routes
+- Google Apps Script 連携
+- PWA
+- Vercel
+
+## 主な機能
+
+### タスク管理
+
+- タスクの新規登録
+- タスクの編集
+- タスクの削除
+- open / closed の状態管理
+- closed タスクの再オープン
+- closed タスクの自動削除
+
+### 期限管理
+
+- 次回対応日時の登録
+- 期限が空のタスクを一覧上部に表示
+- 期限が近いタスクの視覚的アラート
+- 期限切れタスクの視覚的アラート
+
+### 履歴管理
+
+- タスクごとの対応履歴登録
+- 履歴タイプの分類
+  - email
+  - phone
+  - other
+- 件名の登録
+- メモの登録
+- 履歴日時の登録
+- 履歴の編集
+- 履歴のソフト削除
+- 削除済み履歴の自動削除
+
+### データ保存・同期
+
+- localStorage によるローカル保存
+- API Routes 経由での外部同期
+- Google Apps Script との連携
+- ローカルデータと外部データのマージ
+- JSON形式でのバックアップ
+- JSON形式での復元
+
+### PWA対応
+
+- Service Worker によるキャッシュ制御
+- ネットワーク不安定時でも利用しやすい構成
+- スマートフォン・PCの両方で利用しやすい画面設計
+
+## 工夫した点
+
+### 1. タスクと対応履歴を分けて管理
+
+通常のタスク管理では「やること」は管理できても、「過去にどんな対応をしたか」が残しにくいと感じました。
+
+そのため、タスク本体とは別に履歴データを持たせ、メール・電話・その他の対応を時系列で残せるようにしました。
+
+### 2. 業務で使うことを想定した期限アラート
+
+次回対応日時が過ぎているタスクや、30分以内に対応が必要なタスクを視覚的に分かるようにしました。
+
+これにより、一覧を見たときに優先度の高いタスクを判断しやすくしています。
+
+### 3. ローカル保存と外部同期の両立
+
+localStorage に保存することで、ブラウザ上で素早く操作できるようにしています。
+
+さらに、API Routes を経由して Google Apps Script と連携し、外部データとの同期も行える構成にしました。
+
+### 4. バックアップ・復元機能
+
+ブラウザのlocalStorageだけに依存すると、データ消失の不安があります。
+
+そのため、JSON形式で手動バックアップ・復元できる機能を追加し、データを自分で退避できるようにしました。
+
+### 5. 日付入力の扱いやすさ
+
+日付・時刻入力では、入力途中に値が消えたりUTC変換で時刻がずれたりしないよう、日付と時刻を分けて扱い、ローカル時刻として処理するようにしています。
+
+## 起動方法
+
+### 1. リポジトリをクローン
+
+```bash
+git clone https://github.com/ot0Yo58/task-app.git
+```
+
+### 2. ディレクトリに移動
+
+```bash
+cd task-app
+```
+
+### 3. 依存関係をインストール
+
+```bash
+npm install
+```
+
+### 4. 開発サーバーを起動
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 5. ブラウザで確認
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+http://localhost:3000
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 環境変数
 
-## Learn More
+Google Apps Script と同期する場合は、以下の環境変数を設定します。
 
-To learn more about Next.js, take a look at the following resources:
+```env
+TASK_APP_GAS_URL=Google Apps Script のURL
+TASK_APP_GAS_TOKEN=任意の認証トークン
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+環境変数が未設定の場合、外部同期は利用できませんが、localStorage によるローカル保存は利用できます。
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## ディレクトリ構成
 
-## Deploy on Vercel
+```text
+task-app/
+├── app/
+│   ├── api/
+│   │   └── tasks/
+│   │       └── route.ts
+│   ├── page.tsx
+│   ├── layout.tsx
+│   └── globals.css
+├── public/
+│   ├── manifest.webmanifest
+│   └── sw.js
+├── package.json
+└── README.md
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 今後の改善予定
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- ログイン機能の追加
+- ユーザーごとのタスク管理
+- DB保存への移行
+- AIによるタスク編集補助
+- 通常モード / ディープモードの切り替え
+- タスク検索機能
+- タスクのカテゴリ分け
+- スマートフォンでの操作性向上
+
+## 制作目的
+
+このアプリは、学習目的だけでなく、実際の業務管理で使うことを意識して作成しました。
+
+タスクの登録・編集だけでなく、対応履歴、期限管理、データ保存、バックアップ、同期まで含めて設計することで、より実用に近いアプリケーションを目指しています。
